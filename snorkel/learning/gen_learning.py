@@ -1,5 +1,12 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from builtins import *
+from future.utils import iteritems
+
 from .classifier import Classifier
-from .utils import MentionScorer
+from numba import jit
 import numbskull
 from numbskull import NumbSkull
 from numbskull.inference import FACTORS
@@ -8,7 +15,7 @@ import numpy as np
 import random
 import scipy.sparse as sparse
 from copy import copy
-from pandas import DataFrame, Series
+from pandas import DataFrame
 from distutils.version import StrictVersion
 from six.moves.cPickle import dump, load
 import os
@@ -17,6 +24,7 @@ DEP_SIMILAR = 0
 DEP_FIXING = 1
 DEP_REINFORCING = 2
 DEP_EXCLUSIVE = 3
+
 
 class GenerativeModel(Classifier):
     """
@@ -51,8 +59,9 @@ class GenerativeModel(Classifier):
         self.lf_class_propensity = lf_class_propensity
         self.weights = None
 
-        self.rng = random.Random()
+        self.rng = np.random.RandomState()
         self.rng.seed(seed)
+        set_numba_seeds(seed)
 
     # These names of factor types are for the convenience of several methods
     # that perform the same operations over multiple types, but this class's
@@ -125,7 +134,9 @@ class GenerativeModel(Classifier):
 
         # Check to make sure matrix is int-valued
         element_type = type(L[0,0])
-        if not element_type in [np.int64, np.int32, int]:
+        # Note: Other simpler forms of this check often don't work; still not
+        # sure why...
+        if not issubclass(element_type, np.integer):
             raise ValueError("""Label matrix must have int-type elements, 
                 but elements have type %s""" % element_type)
 
@@ -174,11 +185,8 @@ class GenerativeModel(Classifier):
             LF_acc_prior_weights.append(label_prior_weight)
             n += 1
 
-        # Make sure is CSR sparse matrix
-        # NB: Can clean up all this copying / etc but is necessary at least once
-        L = L.copy()
-        if not isinstance(L, sparse.csr_matrix):
-            L = sparse.csr_matrix(L)
+        # Reduce overhead of tracking indices by converting L to a CSR sparse matrix.
+        L = sparse.csr_matrix(L).copy()
 
         # If candidate_ranges is provided, remap the values of L using
         # candidate_ranges. This "scoped categorical" approach allows learning
@@ -193,8 +201,7 @@ class GenerativeModel(Classifier):
                 self.candidate_ranges)
 
         # Shuffle the data points, cardinalities, and candidate_ranges
-        idxs = range(m)
-        np.random.shuffle(idxs)
+        idxs = self.rng.permutation(list(range(m)))
         L = L[idxs, :]
         if candidate_ranges is not None:
             self.cardinalities = self.cardinalities[idxs]
@@ -497,7 +504,7 @@ class GenerativeModel(Classifier):
             if dep_type in dep_name_map:
                 dep_mat = getattr(self, dep_name_map[dep_type])
             else:
-                raise ValueError("Unrecognized dependency type: " + unicode(dep_type))
+                raise ValueError("Unrecognized dependency type: " + str(dep_type))
 
             dep_mat[lf1, lf2] = 1
 
@@ -585,7 +592,7 @@ class GenerativeModel(Classifier):
         # Candidates (variables)
         for i in range(m):
             variable[i]['isEvidence'] = False
-            variable[i]['initialValue'] = self.rng.randrange(0, cardinalities[i])
+            variable[i]['initialValue'] = self.rng.randint(cardinalities[i])
             variable[i]["dataType"] = 0
             variable[i]["cardinality"] = cardinalities[i]
 
@@ -842,7 +849,7 @@ class GenerativeModel(Classifier):
         save_path2 = os.path.join(save_dir, "{0}.hps.pkl".format(model_name))
         with open(save_path2, 'rb') as f:
             hps = load(f)
-            for k, v in hps.iteritems():
+            for k, v in iteritems(hps):
                 setattr(self, k, v)
         if verbose:
             print("[{0}] Model <{1}> loaded.".format(self.name, model_name))
@@ -896,4 +903,9 @@ class GenerativeModelWeights(object):
             return True
         else:
             return False
-   
+
+
+@jit
+def set_numba_seeds(seed):
+    np.random.seed(seed)
+    random.seed(seed)

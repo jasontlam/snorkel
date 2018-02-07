@@ -1,3 +1,9 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from builtins import *
+
 import numpy as np
 from .utils import MentionScorer
 from ..annotations import save_marginals
@@ -11,10 +17,9 @@ class Classifier(object):
     # otherwise assume X is an AnnotationMatrix
     representation = False
 
-    def __init__(self, cardinality=2, name=None, seed=None):
+    def __init__(self, cardinality=2, name=None):
         self.name = name or self.__class__.__name__
         self.cardinality = cardinality
-        self.seed = seed
 
     def marginals(self, X, batch_size=None, **kwargs):
         raise NotImplementedError()
@@ -108,13 +113,17 @@ class Classifier(object):
 
         # Get the test candidates
         test_candidates = [
-            X_test.get_candidate(session, i) for i in xrange(X_test.shape[0])
+            X_test.get_candidate(session, i) for i in range(X_test.shape[0])
         ] if not self.representation else X_test
 
         # Initialize and return scorer
         s = scorer(test_candidates, Y_test, gold_candidate_set)          
         return s.score(test_marginals, train_marginals=None, b=b,
             display=display, set_unlabeled_as_neg=set_unlabeled_as_neg)
+
+    def _preprocess_data(self, X):
+        """Generic preprocessing subclass; may be called by external methods."""
+        return X
 
     def save(self):
         raise NotImplementedError()
