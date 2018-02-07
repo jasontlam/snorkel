@@ -1,17 +1,14 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
-from builtins import *
-
+import math
 import tensorflow as tf
 import numpy as np
 from time import time
 import os
 from six.moves.cPickle import dump, load
-
+from numpy import inf
 from .classifier import Classifier
 from .utils import reshape_marginals, LabelBalancer
+from sklearn.utils.class_weight import compute_sample_weight
+
 
 class TFNoiseAwareModel(Classifier):
     """
@@ -23,16 +20,11 @@ class TFNoiseAwareModel(Classifier):
     :param seed: Top level seed which is passed into both numpy operations
         via a RandomState maintained by the class, and into TF as a graph-level
         seed.
-    :param deterministic [EXPERIMENTAL / in development!] If True, attempts to
-            make the model deterministic on GPU by replacing all reduce_ and 
-            other non-deterministic operations; has no effect (other than 
-            potential slight slowdown) for CPU (at least for single-threaded?).
     """
-    def __init__(self, n_threads=None, seed=123, deterministic=False, **kwargs):
+    def __init__(self, n_threads=None, seed=123, **kwargs):
         self.n_threads = n_threads
         self.seed = seed
         self.rand_state = np.random.RandomState()
-        self.deterministic = deterministic
         super(TFNoiseAwareModel, self).__init__(**kwargs)
 
     def _build_model(self, **model_kwargs):
@@ -57,7 +49,7 @@ class TFNoiseAwareModel(Classifier):
         """
         raise NotImplementedError()
 
-    def _build_training_ops(self, **training_kwargs):
+    def _build_training_ops(self, weights = None,**training_kwargs):
         """
         Builds the TensorFlow Operations for the training procedure. Must set 
         the following:
@@ -66,18 +58,16 @@ class TFNoiseAwareModel(Classifier):
         """
         # Define loss and marginals ops
         if self.cardinality > 2:
-            loss_fn = tf.nn.softmax_cross_entropy_with_logits
-        else:
-            loss_fn = tf.nn.sigmoid_cross_entropy_with_logits
 
-        # If deterministic=True, avoid use of non-deterministic reduce_ ops
-        if self.deterministic:
-            l = tf.reshape(loss_fn(logits=self.logits, labels=self.Y), [1, -1])
-            self.loss = tf.squeeze(tf.matmul(l, tf.ones_like(l), 
-                transpose_b=True)) / tf.cast(tf.shape(l)[1], tf.float32)
+            # Run normal softmax cross entropy and multiply result with weights
+            # reduce_sum gets the weights of the labels currently in our batch
+            loss_fn = tf.multiply( \
+                tf.nn.softmax_cross_entropy_with_logits(logits=self.logits,labels=self.Y),\
+                tf.reduce_sum(tf.multiply(self.Y,weights),axis = 1))
         else:
-            self.loss = tf.reduce_mean(loss_fn(logits=self.logits, 
-                labels=self.Y))
+            loss_fn = tf.nn.sigmoid_cross_entropy_with_logits(logits=self.logits, \
+                labels=self.Y)
+        self.loss = tf.reduce_mean(loss_fn)
         
         # Build training op
         self.lr = tf.placeholder(tf.float32)
@@ -203,8 +193,25 @@ class TFNoiseAwareModel(Classifier):
         # Build training ops
         # Note that training_kwargs and model_kwargs are mixed together; ideally
         # would be separated but no negative effect
-        with self.graph.as_default():
-            self._build_training_ops(**kwargs)
+        # Hacky wait for balancing categorical
+        if self.cardinality >2:
+            # ----------------------------------------------------
+            #Balance categorical with weights
+            #bincounts for marginals
+            label_counts = np.bincount(np.argmax(Y_train,axis=1))
+
+            #generate weights using log of the inverse percentage of each label
+            weightsArray = []
+            for i in range(self.cardinality):
+                weightsArray.append(math.log(len(X_train)/max(label_counts[i],1))+1)
+            # ----------------------------------------------------
+            with self.graph.as_default():
+                class_weight = tf.constant(weightsArray)
+                self._build_training_ops(weights = class_weight,**kwargs)
+        else:
+            # Build training ops for binary
+            with self.graph.as_default():
+                self._build_training_ops(**kwargs)    
         
         # Initialize variables
         with self.graph.as_default():
@@ -220,6 +227,9 @@ class TFNoiseAwareModel(Classifier):
                 self.name, n, n_epochs, batch_size
             ))
         dev_score_opt = 0.0
+
+        
+
         for t in range(n_epochs):
             epoch_losses = []
             for i in range(0, n, batch_size):
@@ -235,7 +245,8 @@ class TFNoiseAwareModel(Classifier):
                 epoch_losses.append(epoch_loss)
 
             # Reshuffle training data
-            train_idxs = self.rand_state.permutation(list(range(n)))
+            train_idxs = range(n)
+            self.rand_state.shuffle(train_idxs)
             X_train = [X_train[j] for j in train_idxs] if self.representation \
                 else X_train[train_idxs, :]
             Y_train = Y_train[train_idxs]
@@ -281,13 +292,10 @@ class TFNoiseAwareModel(Classifier):
             # Iterate over batches
             batch_marginals = []
             for b in range(0, N, batch_size):
-                batch = self._marginals_batch(X[b:min(N, b+batch_size)])
-                
-                # Note: if a single marginal in *binary* classification is
-                # returned, it will have shape () rather than (1,)- catch here
-                if len(batch.shape) == 0:
-                    batch = batch.reshape(1)
-                    
+                batch = self._marginals_batch(X[b:b+batch_size])
+                # Note: Make sure a list is returned!
+                if min(b+batch_size, N) - b == 1:
+                    batch = np.array([batch])
                 batch_marginals.append(batch)
             return np.concatenate(batch_marginals)
 
@@ -345,3 +353,7 @@ class TFNoiseAwareModel(Classifier):
         else:
             raise Exception("[{0}] No model found at <{1}>".format(
                 self.name, model_name))
+
+    def _preprocess_data(self, X):
+        """Generic preprocessing subclass; may be called by external methods."""
+        return X
